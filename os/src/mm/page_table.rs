@@ -155,6 +155,15 @@ impl PageTable {
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
+    /// Unmap a range of virtual page numbers [start_vpn, end_vpn)
+    #[allow(unused)]
+    pub fn unmap_range(&mut self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) {
+        let mut vpn = start_vpn;
+        while vpn.0 < end_vpn.0 {
+            self.unmap(vpn);
+            vpn.step();
+        }
+    }
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table

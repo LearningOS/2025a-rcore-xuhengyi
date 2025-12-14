@@ -24,6 +24,9 @@ pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
 
+use crate::config::MAX_SYSCALL_NUM;
+
+
 /// The task manager, where all the tasks are managed.
 ///
 /// Functions implemented on `TaskManager` deals with all task state transitions
@@ -153,6 +156,38 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn add_syscall_times(&self, id: usize) {
+        if id < MAX_SYSCALL_NUM {
+            let mut inner = self.inner.exclusive_access();
+            let cur = inner.current_task;
+            inner.tasks[cur].syscall_times[id] += 1;
+        }
+    }
+
+    fn get_syscall_times(&self, id: usize) -> usize {
+        if id < MAX_SYSCALL_NUM {
+            let inner = self.inner.exclusive_access();
+            let cur = inner.current_task;
+            inner.tasks[cur].syscall_times[id]
+        } else {
+            0
+        }
+    }
+
+    /// Map a memory area for the current 'Running' task.
+    fn current_mmap(&self, start: usize, len: usize, prot: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.mmap(start, len, prot)
+    }
+
+    /// Unmap a memory area for the current 'Running' task.
+    fn current_munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.munmap(start, len)
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +236,19 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Add syscall times of current 'Running' task.
+pub fn add_syscall_times(id: usize) { TASK_MANAGER.add_syscall_times(id); }
+/// Get syscall times of current 'Running' task.
+pub fn current_syscall_times(id: usize) -> usize { TASK_MANAGER.get_syscall_times(id) }
+
+/// Map a memory area for the current 'Running' task.
+pub fn current_mmap(start: usize, len: usize, prot: usize) -> isize {
+    TASK_MANAGER.current_mmap(start, len, prot)
+}
+
+/// Unmap a memory area for the current 'Running' task.
+pub fn current_munmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.current_munmap(start, len)
 }
