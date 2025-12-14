@@ -49,6 +49,12 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    pub deadlock_detect_enabled: bool,
+    pub mutex_allocation: Vec<Vec<u32>>,
+    pub mutex_need: Vec<Vec<u32>>,
+    pub semaphore_total: Vec<u32>,
+    pub semaphore_allocation: Vec<Vec<u32>>,
+    pub semaphore_need: Vec<Vec<u32>>,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +87,204 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+
+    pub fn ensure_mutex_matrix(&mut self, tid: usize, mutex_id: usize) {
+        let rows = tid + 1;
+        if self.mutex_allocation.len() < rows {
+            self.mutex_allocation.resize(rows, Vec::new());
+            self.mutex_need.resize(rows, Vec::new());
+        }
+        for i in 0..self.mutex_allocation.len() {
+            if self.mutex_allocation[i].len() <= mutex_id {
+                self.mutex_allocation[i].resize(mutex_id + 1, 0);
+            }
+            if self.mutex_need[i].len() <= mutex_id {
+                self.mutex_need[i].resize(mutex_id + 1, 0);
+            }
+        }
+    }
+
+    pub fn ensure_semaphore_matrix(&mut self, tid: usize, sem_id: usize) {
+        let rows = tid + 1;
+        if self.semaphore_allocation.len() < rows {
+            self.semaphore_allocation.resize(rows, Vec::new());
+            self.semaphore_need.resize(rows, Vec::new());
+        }
+        for i in 0..self.semaphore_allocation.len() {
+            if self.semaphore_allocation[i].len() <= sem_id {
+                self.semaphore_allocation[i].resize(sem_id + 1, 0);
+            }
+            if self.semaphore_need[i].len() <= sem_id {
+                self.semaphore_need[i].resize(sem_id + 1, 0);
+            }
+        }
+        if self.semaphore_total.len() <= sem_id {
+            self.semaphore_total.resize(sem_id + 1, 0);
+        }
+    }
+
+    pub fn mutex_available(&self, mutex_id: usize) -> i32 {
+        let mut allocated = 0;
+        for row in self.mutex_allocation.iter() {
+            if mutex_id < row.len() {
+                allocated += row[mutex_id] as i32;
+            }
+        }
+        1 - allocated
+    }
+
+    pub fn semaphore_available(&self, sem_id: usize) -> i32 {
+        if sem_id >= self.semaphore_total.len() {
+            return 0;
+        }
+        let total = self.semaphore_total[sem_id] as i32;
+        let mut allocated = 0;
+        for row in self.semaphore_allocation.iter() {
+            if sem_id < row.len() {
+                allocated += row[sem_id] as i32;
+            }
+        }
+        total - allocated
+    }
+
+    pub fn set_mutex_need(&mut self, tid: usize, mutex_id: usize, v: u32) {
+        self.ensure_mutex_matrix(tid, mutex_id);
+        self.mutex_need[tid][mutex_id] = v;
+    }
+
+    pub fn set_mutex_allocation(&mut self, tid: usize, mutex_id: usize, v: u32) {
+        self.ensure_mutex_matrix(tid, mutex_id);
+        self.mutex_allocation[tid][mutex_id] = v;
+    }
+
+    pub fn add_semaphore_allocation(&mut self, tid: usize, sem_id: usize, delta: i32) {
+        self.ensure_semaphore_matrix(tid, sem_id);
+        let v = &mut self.semaphore_allocation[tid][sem_id];
+        let new = *v as i32 + delta;
+        *v = if new < 0 { 0 } else { new as u32 };
+    }
+
+    pub fn set_semaphore_need(&mut self, tid: usize, sem_id: usize, v: u32) {
+        self.ensure_semaphore_matrix(tid, sem_id);
+        self.semaphore_need[tid][sem_id] = v;
+    }
+
+    pub fn is_safe_mutex_state(&self) -> bool {
+        let n = self.mutex_allocation.len();
+        if n == 0 {
+            return true;
+        }
+        let mut m = 0;
+        for row in self.mutex_allocation.iter() {
+            if row.len() > m {
+                m = row.len();
+            }
+        }
+        for row in self.mutex_need.iter() {
+            if row.len() > m {
+                m = row.len();
+            }
+        }
+        if m == 0 {
+            return true;
+        }
+        let mut work = vec![0i32; m];
+        for j in 0..m {
+            let mut allocated = 0;
+            for i in 0..n {
+                if j < self.mutex_allocation[i].len() {
+                    allocated += self.mutex_allocation[i][j] as i32;
+                }
+            }
+            work[j] = 1 - allocated;
+        }
+        let mut finish = vec![false; n];
+        loop {
+            let mut found = false;
+            for i in 0..n {
+                if finish[i] {
+                    continue;
+                }
+                let mut ok = true;
+                for j in 0..m {
+                    let need = if j < self.mutex_need[i].len() {
+                        self.mutex_need[i][j] as i32
+                    } else {
+                        0
+                    };
+                    if need > work[j] {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    for j in 0..m {
+                        if j < self.mutex_allocation[i].len() {
+                            work[j] += self.mutex_allocation[i][j] as i32;
+                        }
+                    }
+                    finish[i] = true;
+                    found = true;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        finish.into_iter().all(|f| f)
+    }
+
+    pub fn is_safe_semaphore_state(&self) -> bool {
+        let n = self.semaphore_allocation.len();
+        let m = self.semaphore_total.len();
+        if n == 0 || m == 0 {
+            return true;
+        }
+        let mut work = vec![0i32; m];
+        for j in 0..m {
+            let mut allocated = 0;
+            for i in 0..n {
+                if j < self.semaphore_allocation[i].len() {
+                    allocated += self.semaphore_allocation[i][j] as i32;
+                }
+            }
+            work[j] = self.semaphore_total[j] as i32 - allocated;
+        }
+        let mut finish = vec![false; n];
+        loop {
+            let mut found = false;
+            for i in 0..n {
+                if finish[i] {
+                    continue;
+                }
+                let mut ok = true;
+                for j in 0..m {
+                    let need = if j < self.semaphore_need[i].len() {
+                        self.semaphore_need[i][j] as i32
+                    } else {
+                        0
+                    };
+                    if need > work[j] {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    for j in 0..m {
+                        if j < self.semaphore_allocation[i].len() {
+                            work[j] += self.semaphore_allocation[i][j] as i32;
+                        }
+                    }
+                    finish[i] = true;
+                    found = true;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        finish.into_iter().all(|f| f)
     }
 }
 
@@ -119,6 +323,12 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_allocation: Vec::new(),
+                    mutex_need: Vec::new(),
+                    semaphore_total: Vec::new(),
+                    semaphore_allocation: Vec::new(),
+                    semaphore_need: Vec::new(),
                 })
             },
         });
@@ -245,6 +455,12 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_allocation: Vec::new(),
+                    mutex_need: Vec::new(),
+                    semaphore_total: Vec::new(),
+                    semaphore_allocation: Vec::new(),
+                    semaphore_need: Vec::new(),
                 })
             },
         });

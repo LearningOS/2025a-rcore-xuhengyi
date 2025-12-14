@@ -1,12 +1,13 @@
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_ref, translated_refmut, translated_str, translated_byte_buffer},
     task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
         suspend_current_and_run_next, SignalFlags,
     },
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
+use crate::timer::get_time_us;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -156,7 +157,33 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if _ts.is_null() {
+        return -1;
+    }
+    let token = current_user_token();
+    let len = core::mem::size_of::<TimeVal>();
+    let mut buffers = translated_byte_buffer(token, _ts as *const u8, len);
+
+    let us = get_time_us();
+    let tv = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+
+    let src_ptr = &tv as *const TimeVal as *const u8;
+    let mut offset = 0;
+    for buf in buffers.iter_mut() {
+        if offset >= len {
+            break;
+        }
+        let copy_len = core::cmp::min(len - offset, buf.len());
+        let src_slice = unsafe {
+            core::slice::from_raw_parts(src_ptr.add(offset), copy_len)
+        };
+        buf[..copy_len].copy_from_slice(src_slice);
+        offset += copy_len;
+    }
+    0
 }
 
 /// mmap syscall
