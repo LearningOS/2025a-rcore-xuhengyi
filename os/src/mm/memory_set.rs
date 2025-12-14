@@ -300,6 +300,63 @@ impl MemorySet {
             false
         }
     }
+
+    /// Map a range of virtual page numbers [start_vpn, end_vpn)
+    pub fn mmap(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        use crate::config::PAGE_SIZE;
+        if start % PAGE_SIZE != 0 {
+            return -1;
+        }
+        if prot & !0x7 != 0 || prot & 0x7 == 0 {
+            return -1;
+        }
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.page_table.translate(vpn) {
+                if pte.is_valid() {
+                    return -1;
+                }
+            }
+        }
+        let mut perm = MapPermission::U;
+        if prot & 0x1 != 0 {
+            perm |= MapPermission::R;
+        }
+        if prot & 0x2 != 0 {
+            perm |= MapPermission::W;
+        }
+        if prot & 0x4 != 0 {
+            perm |= MapPermission::X;
+        }
+        self.insert_framed_area(start_va, end_va, perm);
+        0
+    }
+    /// Unmap a range of virtual page numbers [start_vpn, end_vpn)
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        use crate::config::PAGE_SIZE;
+        if start % PAGE_SIZE != 0 {
+            return -1;
+        }
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.page_table.translate(vpn) {
+                Some(pte) if pte.is_valid() => {}
+                _ => return -1,
+            }
+        }
+        let mut vpn = start_vpn;
+        while vpn.0 < end_vpn.0 {
+            self.page_table.unmap(vpn);
+            vpn.step();
+        }
+        0
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

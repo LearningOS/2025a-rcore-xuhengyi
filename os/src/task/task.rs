@@ -68,6 +68,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Dynamic priority of the task (smaller value means higher priority)
+    pub priority: isize,
+
+    /// Current stride value used by stride scheduler
+    pub stride: isize,
 }
 
 impl TaskControlBlockInner {
@@ -84,6 +90,18 @@ impl TaskControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+    pub fn get_priority(&self) -> isize {
+        self.priority
+    }
+    pub fn set_priority(&mut self, prio: isize) {
+        self.priority = prio;
+    }
+    pub fn get_stride(&self) -> isize {
+        self.stride
+    }
+    pub fn add_stride(&mut self, delta: isize) {
+        self.stride += delta;
     }
 }
 
@@ -118,6 +136,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: 0,
                 })
             },
         };
@@ -191,6 +211,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
                 })
             },
         });

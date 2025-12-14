@@ -1,29 +1,57 @@
 //!Implementation of [`TaskManager`]
 use super::TaskControlBlock;
 use crate::sync::UPSafeCell;
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use lazy_static::*;
+
+const BIG_STRIDE: isize = 1_000_000;
+
 ///A array of `TaskControlBlock` that is thread-safe
 pub struct TaskManager {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
+    ready_queue: Vec<Arc<TaskControlBlock>>,
 }
 
-/// A simple FIFO scheduler.
+/// A stride scheduler with dynamic priority.
 impl TaskManager {
     ///Creat an empty TaskManager
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
+            ready_queue: Vec::new(),
         }
     }
     /// Add process back to ready queue
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
-        self.ready_queue.push_back(task);
+        self.ready_queue.push(task);
     }
-    /// Take a process out of the ready queue
+    /// Take a process out of the ready queue using stride scheduling
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        if self.ready_queue.is_empty() {
+            return None;
+        }
+        let mut min_idx = 0;
+        let mut min_stride = {
+            let inner = self.ready_queue[0].inner_exclusive_access();
+            inner.get_stride()
+        };
+        for i in 1..self.ready_queue.len() {
+            let stride = {
+                let inner = self.ready_queue[i].inner_exclusive_access();
+                inner.get_stride()
+            };
+            if stride < min_stride {
+                min_stride = stride;
+                min_idx = i;
+            }
+        }
+        let task = self.ready_queue.swap_remove(min_idx);
+        {
+            let mut inner = task.inner_exclusive_access();
+            let prio = inner.get_priority();
+            let pass = BIG_STRIDE / prio;
+            inner.add_stride(pass);
+        }
+        Some(task)
     }
 }
 
