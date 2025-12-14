@@ -15,6 +15,21 @@ pub struct Inode {
 }
 
 impl Inode {
+    /// Get the block id of this inode
+    pub fn block_id(&self) -> usize {
+        self.block_id
+    }
+
+    /// Get the block offset of this inode
+    pub fn block_offset(&self) -> usize {
+        self.block_offset
+    }
+
+    /// Check if this inode is a directory
+    pub fn is_dir(&self) -> bool {
+        self.read_disk_inode(|d| d.is_dir())
+    }
+
     /// Create a vfs inode
     pub fn new(
         block_id: u32,
@@ -182,5 +197,98 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+
+    /// Get the metadata of current inode
+    pub fn metadata(&self) -> (u64, bool) {
+        let is_dir = self.is_dir();
+        (self.block_id() as u64, is_dir)
+    }
+
+    /// Create a hard link in this directory pointing to `target`
+    pub fn link(&self, name: &str, target: &Arc<Inode>) -> bool {
+        let mut fs = self.fs.lock();
+        let op = |root_inode: &DiskInode| {
+            assert!(root_inode.is_dir());
+            self.find_inode_id(name, root_inode)
+        };
+        if self.read_disk_inode(op).is_some() {
+            return false;
+        }
+        let t_block_id = target.block_id;
+        let t_block_offset = target.block_offset;
+        let mut inode_id_opt: Option<u32> = None;
+        self.read_disk_inode(|disk_inode| {
+            let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            for i in 0..file_count {
+                disk_inode.read_at(
+                    i * DIRENT_SZ,
+                    dirent.as_bytes_mut(),
+                    &self.block_device,
+                );
+                let (b_id, off) = fs.get_disk_inode_pos(dirent.inode_id());
+                if b_id as usize == t_block_id && off == t_block_offset {
+                    inode_id_opt = Some(dirent.inode_id());
+                    break;
+                }
+            }
+        });
+        let inode_id = match inode_id_opt {
+            Some(id) => id,
+            None => return false,
+        };
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let dirent = DirEntry::new(name, inode_id);
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        block_cache_sync_all();
+        true
+    }
+    /// Remove a hard link to current inode
+    pub fn unlink(&self, name: &str) -> bool {
+        let _fs = self.fs.lock();
+        let mut removed = false;
+        self.modify_disk_inode(|disk_inode| {
+            assert!(disk_inode.is_dir());
+            let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            let mut idx = None;
+            for i in 0..file_count {
+                disk_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device);
+                if dirent.name() == name {
+                    idx = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = idx {
+                if i + 1 != file_count {
+                    let mut last = DirEntry::empty();
+                    disk_inode.read_at(
+                        (file_count - 1) * DIRENT_SZ,
+                        last.as_bytes_mut(),
+                        &self.block_device,
+                    );
+                    disk_inode.write_at(
+                        i * DIRENT_SZ,
+                        last.as_bytes(),
+                        &self.block_device,
+                    );
+                }
+                disk_inode.size -= DIRENT_SZ as u32;
+                removed = true;
+            }
+        });
+        if removed {
+            block_cache_sync_all();
+        }
+        removed
     }
 }

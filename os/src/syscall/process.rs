@@ -1,10 +1,12 @@
 //! Process management syscalls
 //!
 use alloc::sync::Arc;
-
+use crate::task::TaskControlBlock;
+use alloc::vec;
+use crate::timer::get_time_us;
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, translated_byte_buffer},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next,
@@ -110,7 +112,33 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _ts.is_null() {
+        return -1;
+    }
+    let token = current_user_token();
+    let len = core::mem::size_of::<TimeVal>();
+    let mut buffers = translated_byte_buffer(token, _ts as *const u8, len);
+
+    let us = get_time_us();
+    let tv = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+
+    let src_ptr = &tv as *const TimeVal as *const u8;
+    let mut offset = 0;
+    for buf in buffers.iter_mut() {
+        if offset >= len {
+            break;
+        }
+        let copy_len = core::cmp::min(len - offset, buf.len());
+        let src_slice = unsafe {
+            core::slice::from_raw_parts(src_ptr.add(offset), copy_len)
+        };
+        buf[..copy_len].copy_from_slice(src_slice);
+        offset += copy_len;
+    }
+    0
 }
 
 /// YOUR JOB: Implement mmap.
@@ -119,7 +147,9 @@ pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.memory_set.mmap(_start, _len, _port)
 }
 
 /// YOUR JOB: Implement munmap.
@@ -128,7 +158,9 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.memory_set.munmap(_start, _len)
 }
 
 /// change data segment size
@@ -148,7 +180,40 @@ pub fn sys_spawn(_path: *const u8) -> isize {
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path_str = translated_str(token, _path);
+    // load ELF from filesystem
+    let inode = match open_file(path_str.as_str(), OpenFlags::RDONLY) {
+        Some(i) => i,
+        None => return -1,
+    };
+    let elf_data = inode.read_all();
+
+    // parent process
+    let parent = current_task().unwrap();
+    let mut parent_inner = parent.inner_exclusive_access();
+
+    // create child process from ELF
+    let child = Arc::new(TaskControlBlock::new(elf_data.as_slice()));
+    {
+        let mut child_inner = child.inner_exclusive_access();
+        // set parent relationship
+        child_inner.parent = Some(Arc::downgrade(&parent));
+        // inherit priority/stride/heap layout from parent
+        child_inner.priority = parent_inner.priority;
+        child_inner.stride = parent_inner.stride;
+        child_inner.heap_bottom = parent_inner.heap_bottom;
+        child_inner.program_brk = parent_inner.program_brk;
+        // clone fd table structure from parent (all entries start as None)
+        child_inner.fd_table = vec![None; parent_inner.fd_table.len()];
+    }
+    // add into parent's children list
+    parent_inner.children.push(child.clone());
+    drop(parent_inner);
+
+    let pid = child.getpid();
+    add_task(child);
+    pid as isize
 }
 
 // YOUR JOB: Set task priority.
@@ -157,5 +222,12 @@ pub fn sys_set_priority(_prio: isize) -> isize {
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // valid range: prio >= 2
+    if _prio < 2 {
+        return -1;
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.set_priority(_prio);
+    _prio
 }

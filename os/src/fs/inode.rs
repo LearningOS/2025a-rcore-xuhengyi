@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -56,6 +56,7 @@ impl OSInode {
 }
 
 lazy_static! {
+    /// Root directory inode of the mounted EasyFileSystem
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -155,5 +156,35 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn stat(&self) -> Stat {
+        let inner = self.inner.exclusive_access();
+        let inode = inner.inode.clone();
+        drop(inner);
+        let (ino, is_dir) = inode.metadata();
+        let self_block_id = inode.block_id() as u64;
+        let self_block_offset = inode.block_offset() as u64;
+        let nlink = if is_dir {
+            1
+        } else {
+            let mut count: u32 = 0;
+            for name in ROOT_INODE.ls() {
+                if let Some(child) = ROOT_INODE.find(name.as_str()) {
+                    let child_block_id = child.block_id() as u64;
+                    let child_block_offset = child.block_offset() as u64;
+                    if child_block_id == self_block_id && child_block_offset == self_block_offset {
+                        count += 1;
+                    }
+                }
+            }
+            if count == 0 { 1 } else { count }
+        };
+        Stat {
+            dev: 0,
+            ino,
+            mode: if is_dir { StatMode::DIR } else { StatMode::FILE },
+            nlink,
+            pad: [0; 7],
+        }
     }
 }

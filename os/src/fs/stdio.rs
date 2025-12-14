@@ -10,6 +10,8 @@ pub struct Stdin;
 /// stdout file for putting chars to console
 pub struct Stdout;
 
+use super::{Stat, StatMode};
+
 impl File for Stdin {
     fn readable(&self) -> bool {
         true
@@ -39,6 +41,15 @@ impl File for Stdin {
     fn write(&self, _user_buf: UserBuffer) -> usize {
         panic!("Cannot write to stdin!");
     }
+    fn stat(&self) -> Stat {
+        Stat {
+            dev: 0,
+            ino: 0,
+            mode: StatMode::FILE,
+            nlink: 1,
+            pad: [0; 7],
+        }
+    }
 }
 
 impl File for Stdout {
@@ -56,5 +67,14 @@ impl File for Stdout {
             print!("{}", core::str::from_utf8(*buffer).unwrap());
         }
         user_buf.len()
+    }
+    fn stat(&self) -> Stat {
+        Stat {
+            dev: 0,
+            ino: 0,
+            mode: StatMode::FILE,
+            nlink: 1,
+            pad: [0; 7],
+        }
     }
 }

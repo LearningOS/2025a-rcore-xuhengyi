@@ -71,6 +71,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Dynamic priority of the task (smaller value means higher priority)
+    pub priority: isize,
+
+    /// Current stride value used by stride scheduler
+    pub stride: isize,
 }
 
 impl TaskControlBlockInner {
@@ -93,6 +99,18 @@ impl TaskControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
+    pub fn get_priority(&self) -> isize {
+        self.priority
+    }
+    pub fn set_priority(&mut self, prio: isize) {
+        self.priority = prio;
+    }
+    pub fn get_stride(&self) -> isize {
+        self.stride
+    }
+    pub fn add_stride(&mut self, delta: isize) {
+        self.stride += delta;
     }
 }
 
@@ -135,6 +153,8 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: 0,
                 })
             },
         };
@@ -216,6 +236,8 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: 0,
                 })
             },
         });
